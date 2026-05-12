@@ -1,3 +1,4 @@
+import * as R from 'ramda';
 import {
   aiActivity,
   aiForecast,
@@ -52,7 +53,8 @@ import { fetchEditContext } from '../database/redis';
 import { distributionRelations, stixLoadByIdStringify } from '../database/middleware';
 import { worksForSource } from '../domain/work';
 import { BUS_TOPICS } from '../config/conf';
-import { ABSTRACT_STIX_CORE_OBJECT, INPUT_CREATED_BY, INPUT_GRANTED_REFS, INPUT_LABELS } from '../schema/general';
+import { ForbiddenAccess } from '../config/errors';
+import { ABSTRACT_STIX_CORE_OBJECT, INPUT_CREATED_BY, INPUT_GRANTED_REFS, INPUT_LABELS, KNOWLEDGE_COLLABORATION, KNOWLEDGE_UPDATE } from '../schema/general';
 import { subscribeToInstanceEvents } from '../graphql/subscriptionWrapper';
 import { connectorsForEnrichment } from '../database/repository';
 import { addOrganizationRestriction, removeOrganizationRestriction } from '../domain/stix';
@@ -61,8 +63,47 @@ import { numberOfContainersForObject } from '../domain/container';
 import { paginatedForPathWithEnrichment } from '../modules/internal/document/document-domain';
 import { getSpecVersionOrDefault } from '../domain/stixRelationship';
 import { loadThroughDenormalized } from './stix';
-import { getUserAccessRight } from '../utils/access';
+import { BYPASS, getUserAccessRight } from '../utils/access';
+import { RELATION_CREATED_BY } from '../schema/stixRefRelationship';
+import { internalLoadById } from '../database/middleware-loader';
 
+// Needs to have edit rights or needs to be creator of the STIX core object,
+// and must share at least one organization with the object's creator.
+const checkUserAccess = async (context, user, id) => {
+  const userCapabilities = R.flatten(user.capabilities.map((c) => c.name.split('_')));
+  const isBypass = userCapabilities.includes(BYPASS);
+  const isAuthorized = userCapabilities.includes(KNOWLEDGE_UPDATE);
+  const stixObject = await findById(context, user, id);
+  const isCreator = stixObject[RELATION_CREATED_BY] ? stixObject[RELATION_CREATED_BY] === user.individual_id : false;
+  const isCollaborationAllowed = userCapabilities.includes(KNOWLEDGE_COLLABORATION) && isCreator;
+  const accessGranted = isBypass || isAuthorized || isCollaborationAllowed;
+  if (!accessGranted) throw ForbiddenAccess();
+
+  if (!isBypass && !isCreator) {
+    const creatorId = stixObject[RELATION_CREATED_BY];
+    if (creatorId) {
+      const creator = await internalLoadById(context, user, creatorId);
+      const creatorOrgIds = new Set(
+        (creator?.objectOrganization || []).map(
+          (o) => (typeof o === 'string' ? o : (o.internal_id || o.id))
+        )
+      );
+      const userOrgIds = new Set(
+        (user.organizations || []).map((o) => o.internal_id)
+      );
+      let sharesOrganization = false;
+      for (const orgId of creatorOrgIds) {
+        if (userOrgIds.has(orgId)) {
+          sharesOrganization = true;
+          break;
+        }
+      }
+      if (!sharesOrganization) {
+        throw ForbiddenAccess();
+      }
+    }
+  }
+};
 const stixCoreObjectResolvers = {
   Query: {
     globalSearch: (_, args, context) => globalSearchPaginated(context, context.user, args),
@@ -162,10 +203,20 @@ const stixCoreObjectResolvers = {
   },
   Mutation: {
     stixCoreObjectEdit: (_, { id }, context) => ({
-      delete: () => stixCoreObjectDelete(context, context.user, id),
-      relationAdd: ({ input }) => stixCoreObjectAddRelation(context, context.user, id, input),
-      relationsAdd: ({ input, commitMessage, references }) => stixCoreObjectAddRelations(context, context.user, id, input, { commitMessage, references }),
-      relationDelete: ({ toId, relationship_type: relationshipType, commitMessage, references }) => {
+      delete: async () => {
+        await checkUserAccess(context, context.user, id);
+        return stixCoreObjectDelete(context, context.user, id);
+      },
+      relationAdd: async ({ input }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixCoreObjectAddRelation(context, context.user, id, input);
+      },
+      relationsAdd: async ({ input, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixCoreObjectAddRelations(context, context.user, id, input, { commitMessage, references });
+      },
+      relationDelete: async ({ toId, relationship_type: relationshipType, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
         return stixCoreObjectDeleteRelation(context, context.user, id, toId, relationshipType, { commitMessage, references });
       },
       clearAccessRestriction: () => stixCoreObjectRemoveAuthMembers(context, context.user, id),
