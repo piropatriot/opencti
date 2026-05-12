@@ -19,7 +19,7 @@ import { ENTITY_TYPE_USER } from '../../schema/internalObject';
 import { type BasicStoreEntityOrganization, ENTITY_TYPE_IDENTITY_ORGANIZATION } from './organization-types';
 import type { AuthContext, AuthUser } from '../../types/user';
 import type { BasicObject, OrganizationAddInput, ResolversTypes } from '../../generated/graphql';
-import { AlreadyDeletedError, FunctionalError } from '../../config/errors';
+import { AlreadyDeletedError, ForbiddenAccess, FunctionalError } from '../../config/errors';
 import { isUserHasCapability, SETTINGS_SET_ACCESSES } from '../../utils/access';
 import { publishUserAction } from '../../listener/UserActionListener';
 import type { BasicStoreEntity } from '../../types/store';
@@ -48,6 +48,9 @@ export const addOrganization = async (context: AuthContext, user: AuthUser, orga
   return notify(BUS_TOPICS[ABSTRACT_STIX_DOMAIN_OBJECT].ADDED_TOPIC, created, user);
 };
 export const editAuthorizedAuthorities = async (context: AuthContext, user: AuthUser, organizationId: string, input: string[]) => {
+  if (!isUserHasCapability(user, SETTINGS_SET_ACCESSES)) {
+    throw ForbiddenAccess();
+  }
   const patch = { authorized_authorities: input };
   const { element } = await patchAttribute(context, user, organizationId, ENTITY_TYPE_IDENTITY_ORGANIZATION, patch);
   return notify(BUS_TOPICS[ABSTRACT_STIX_DOMAIN_OBJECT].EDIT_TOPIC, element, user);

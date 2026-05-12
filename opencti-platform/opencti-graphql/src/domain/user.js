@@ -1228,10 +1228,13 @@ export const userAddRelation = async (context, user, userId, input) => {
   if (!isInternalRelationship(input.relationship_type)) {
     throw FunctionalError(`Only ${ABSTRACT_INTERNAL_RELATIONSHIP} can be added through this method, got ${input.relationship_type}.`);
   }
-  // Check in case organization admins adds non-grantable group a user
+  // Check in case organization admins adds non-grantable group or unauthorized role/capability to a user
   const myGrantableGroups = R.uniq(user.administrated_organizations.map((orga) => orga.grantable_groups).flat());
   if (isOnlyOrgaAdmin(user)) {
     if (input.relationship_type === 'member-of' && !myGrantableGroups.includes(input.toId)) {
+      throw ForbiddenAccess();
+    }
+    if (input.relationship_type === 'has-role' || input.relationship_type === 'has-capability') {
       throw ForbiddenAccess();
     }
   }
@@ -1252,6 +1255,12 @@ export const userAddRelation = async (context, user, userId, input) => {
 export const userDeleteRelation = async (context, user, targetUser, toId, relationshipType) => {
   if (!isInternalRelationship(relationshipType)) {
     throw FunctionalError(`Only ${ABSTRACT_INTERNAL_RELATIONSHIP} can be deleted through this method.`);
+  }
+  // Organization admins must not directly remove roles or capabilities from users
+  if (isOnlyOrgaAdmin(user)) {
+    if (relationshipType === 'has-role' || relationshipType === 'has-capability') {
+      throw ForbiddenAccess();
+    }
   }
   const { to } = await deleteRelationsByFromAndTo(context, user, targetUser.id, toId, relationshipType, ABSTRACT_INTERNAL_RELATIONSHIP);
   const input = { relationship_type: relationshipType, toId };

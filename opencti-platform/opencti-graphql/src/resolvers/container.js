@@ -1,3 +1,4 @@
+import * as R from 'ramda';
 import {
   containersObjectsOfObject,
   findContainerPaginated,
@@ -22,9 +23,22 @@ import {
 } from '../domain/stixDomainObject';
 import { investigationAddFromContainer } from '../modules/workspace/investigation-domain';
 import { getAuthorizedMembers } from '../utils/authorizedMembers';
-import { getUserAccessRight } from '../utils/access';
+import { BYPASS, getUserAccessRight, isUserHasCapability, KNOWLEDGE_KNUPDATE } from '../utils/access';
 import { distributionEntities } from '../database/middleware';
-import { ENTITY_TYPE_CONTAINER } from '../schema/general';
+import { ENTITY_TYPE_CONTAINER, KNOWLEDGE_COLLABORATION, KNOWLEDGE_UPDATE } from '../schema/general';
+import { RELATION_CREATED_BY } from '../schema/stixRefRelationship';
+import { ForbiddenAccess } from '../config/errors';
+
+// Needs to have edit rights or needs to be creator of the container
+const checkUserAccess = async (context, user, id) => {
+  const userCapabilities = R.flatten(user.capabilities.map((c) => c.name.split('_')));
+  const isAuthorized = userCapabilities.includes(BYPASS) || userCapabilities.includes(KNOWLEDGE_UPDATE);
+  const container = await findById(context, user, id);
+  const isCreator = container[RELATION_CREATED_BY] ? container[RELATION_CREATED_BY] === user.individual_id : false;
+  const isCollaborationAllowed = userCapabilities.includes(KNOWLEDGE_COLLABORATION) && isCreator;
+  const accessGranted = isAuthorized || isCollaborationAllowed;
+  if (!accessGranted) throw ForbiddenAccess();
+};
 
 const containerResolvers = {
   Query: {
@@ -80,14 +94,37 @@ const containerResolvers = {
   // },
   Mutation: {
     containerEdit: (_, { id }, context) => ({
-      delete: () => stixDomainObjectDelete(context, context.user, id, ENTITY_TYPE_CONTAINER),
-      fieldPatch: ({ input, commitMessage, references }) => stixDomainObjectEditField(context, context.user, id, input, { commitMessage, references }),
-      contextPatch: ({ input }) => stixDomainObjectEditContext(context, context.user, id, input),
-      contextClean: () => stixDomainObjectCleanContext(context, context.user, id),
-      editAuthorizedMembers: ({ input }) => containerEditAuthorizedMembers(context, context.user, id, input),
-      relationAdd: ({ input, commitMessage, references }) => stixDomainObjectAddRelation(context, context.user, id, input, { commitMessage, references }),
+      delete: async () => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectDelete(context, context.user, id, ENTITY_TYPE_CONTAINER);
+      },
+      fieldPatch: async ({ input, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
+        const isManager = isUserHasCapability(context.user, KNOWLEDGE_KNUPDATE);
+        const availableInputs = isManager ? input : input.filter((i) => i.key !== 'createdBy');
+        return stixDomainObjectEditField(context, context.user, id, availableInputs, { commitMessage, references });
+      },
+      contextPatch: async ({ input }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectEditContext(context, context.user, id, input);
+      },
+      contextClean: async () => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectCleanContext(context, context.user, id);
+      },
+      editAuthorizedMembers: async ({ input }) => {
+        await checkUserAccess(context, context.user, id);
+        return containerEditAuthorizedMembers(context, context.user, id, input);
+      },
+      relationAdd: async ({ input, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectAddRelation(context, context.user, id, input, { commitMessage, references });
+      },
       // eslint-disable-next-line max-len
-      relationDelete: ({ toId, relationship_type: relationshipType, commitMessage, references }) => stixDomainObjectDeleteRelation(context, context.user, id, toId, relationshipType, { commitMessage, references }),
+      relationDelete: async ({ toId, relationship_type: relationshipType, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectDeleteRelation(context, context.user, id, toId, relationshipType, { commitMessage, references });
+      },
       investigationAdd: () => investigationAddFromContainer(context, context.user, id),
       knowledgeAddFromInvestigation: ({ workspaceId }) => knowledgeAddFromInvestigation(context, context.user, { containerId: id, workspaceId }),
     }),

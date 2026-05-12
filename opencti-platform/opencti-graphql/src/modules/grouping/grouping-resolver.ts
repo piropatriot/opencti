@@ -1,3 +1,4 @@
+import * as R from 'ramda';
 import type { Resolvers } from '../../generated/graphql';
 import {
   addGrouping,
@@ -21,9 +22,54 @@ import {
   stixDomainObjectEditField,
 } from '../../domain/stixDomainObject';
 import { distributionEntities } from '../../database/middleware';
+import { internalLoadById } from '../../database/middleware-loader';
 
 import { ENTITY_TYPE_CONTAINER_GROUPING } from './grouping-types';
 import { findSecurityCoverageByCoveredId } from '../securityCoverage/securityCoverage-domain';
+import { RELATION_CREATED_BY } from '../../schema/stixRefRelationship';
+import { KNOWLEDGE_COLLABORATION, KNOWLEDGE_UPDATE } from '../../schema/general';
+import { BYPASS } from '../../utils/access';
+import { ForbiddenAccess } from '../../config/errors';
+
+// Needs to have edit rights or needs to be creator of the grouping,
+// and must share at least one organization with the grouping's creator.
+const checkUserAccess = async (context: any, user: any, id: string) => {
+  const userCapabilities = R.flatten(user.capabilities.map((c: any) => c.name.split('_')));
+  const isBypass = userCapabilities.includes(BYPASS);
+  const isAuthorized = userCapabilities.includes(KNOWLEDGE_UPDATE);
+  const grouping = await findById(context, user, id);
+  const isCreator = grouping[RELATION_CREATED_BY] ? grouping[RELATION_CREATED_BY] === user.individual_id : false;
+  const isCollaborationAllowed = userCapabilities.includes(KNOWLEDGE_COLLABORATION) && isCreator;
+  const accessGranted = isBypass || isAuthorized || isCollaborationAllowed;
+  if (!accessGranted) throw ForbiddenAccess();
+
+  // Enforce organization membership: non-bypass users must share at least
+  // one organization with the grouping's creator to prevent cross-org modification.
+  if (!isBypass && !isCreator) {
+    const creatorId = grouping[RELATION_CREATED_BY];
+    if (creatorId) {
+      const creator = await internalLoadById(context, user, creatorId);
+      const creatorOrgIds = new Set(
+        (creator?.objectOrganization || []).map(
+          (o: any) => (typeof o === 'string' ? o : (o.internal_id || o.id))
+        )
+      );
+      const userOrgIds = new Set(
+        (user.organizations || []).map((o: any) => o.internal_id)
+      );
+      let sharesOrganization = false;
+      for (const orgId of creatorOrgIds) {
+        if (userOrgIds.has(orgId as string)) {
+          sharesOrganization = true;
+          break;
+        }
+      }
+      if (!sharesOrganization) {
+        throw ForbiddenAccess();
+      }
+    }
+  }
+};
 
 const groupingResolvers: Resolvers = {
   Query: {
@@ -64,22 +110,28 @@ const groupingResolvers: Resolvers = {
     groupingAdd: (_, { input }, context) => {
       return addGrouping(context, context.user, input);
     },
-    groupingDelete: (_, { id }, context) => {
+    groupingDelete: async (_, { id }, context) => {
+      await checkUserAccess(context, context.user, id);
       return stixDomainObjectDelete(context, context.user, id, ENTITY_TYPE_CONTAINER_GROUPING);
     },
-    groupingFieldPatch: (_, { id, input, commitMessage, references }, context) => {
+    groupingFieldPatch: async (_, { id, input, commitMessage, references }, context) => {
+      await checkUserAccess(context, context.user, id);
       return stixDomainObjectEditField(context, context.user, id, input, { commitMessage, references });
     },
-    groupingContextPatch: (_, { id, input }, context) => {
+    groupingContextPatch: async (_, { id, input }, context) => {
+      await checkUserAccess(context, context.user, id);
       return stixDomainObjectEditContext(context, context.user, id, input);
     },
-    groupingContextClean: (_, { id }, context) => {
+    groupingContextClean: async (_, { id }, context) => {
+      await checkUserAccess(context, context.user, id);
       return stixDomainObjectCleanContext(context, context.user, id);
     },
-    groupingRelationAdd: (_, { id, input }, context) => {
+    groupingRelationAdd: async (_, { id, input }, context) => {
+      await checkUserAccess(context, context.user, id);
       return stixDomainObjectAddRelation(context, context.user, id, input);
     },
-    groupingRelationDelete: (_, { id, toId, relationship_type: relationshipType }, context) => {
+    groupingRelationDelete: async (_, { id, toId, relationship_type: relationshipType }, context) => {
+      await checkUserAccess(context, context.user, id);
       return stixDomainObjectDeleteRelation(context, context.user, id, toId, relationshipType);
     },
   },

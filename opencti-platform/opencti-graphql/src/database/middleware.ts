@@ -170,6 +170,7 @@ import {
   isBypassUser,
   isMarkingAllowed,
   isOrganizationAllowed,
+  isOrganizationUnrestricted,
   isUserCanAccessStoreElement,
   isUserHasCapability,
   KNOWLEDGE_KNUPDATE_KNBYPASSREFERENCE,
@@ -2415,6 +2416,13 @@ export const updateAttributeMetaResolved = async <T extends StoreObject>(
   const draft = draftId ? await findDraftById(context, user, draftId) : null;
   if (!validateUserAccessOperation(user, initial, accessOperation, draft)) {
     throw ForbiddenAccess();
+  }
+  // Enforce organization-scoped authorization for write operations
+  const platformOrgId = settings.platform_organization;
+  if (platformOrgId && !isOrganizationUnrestricted(initial)) {
+    if (!isOrganizationAllowed(context, initial, user, !!platformOrgId)) {
+      throw ForbiddenAccess();
+    }
   }
   // Split attributes and meta
   // Supports inputs meta or stix meta

@@ -12,7 +12,7 @@ import { BUS_TOPICS } from '../config/conf';
 import { delEditContext, notify, setEditContext } from '../database/redis';
 import { ENTITY_TYPE_GROUP, ENTITY_TYPE_ROLE, ENTITY_TYPE_USER } from '../schema/internalObject';
 import { isInternalRelationship, RELATION_ACCESSES_TO, RELATION_HAS_ROLE, RELATION_MEMBER_OF } from '../schema/internalRelationship';
-import { FunctionalError } from '../config/errors';
+import { ForbiddenAccess, FunctionalError } from '../config/errors';
 import { ABSTRACT_INTERNAL_RELATIONSHIP } from '../schema/general';
 import { ENTITY_TYPE_MARKING_DEFINITION } from '../schema/stixMetaObject';
 import { getEntitiesMapFromCache } from '../database/cache';
@@ -180,6 +180,14 @@ export const groupAddRelation = async (context, user, groupId, input) => {
   if (!isInternalRelationship(input.relationship_type)) {
     throw FunctionalError(`Only ${ABSTRACT_INTERNAL_RELATIONSHIP} can be added through this method, got ${input.relationship_type}.`);
   }
+  // Authorization: only users with SETTINGS_SET_ACCESSES can modify groups,
+  // and organization admins are restricted to their grantable_groups
+  if (!isUserHasCapability(user, SETTINGS_SET_ACCESSES)) {
+    const groupsIds = R.uniq((user.administrated_organizations ?? []).map((orga) => (orga.grantable_groups ?? [])).flat());
+    if (!groupsIds.includes(groupId)) {
+      throw ForbiddenAccess();
+    }
+  }
   let finalInput;
   if (input.fromId) {
     finalInput = { ...input, toId: groupId };
@@ -217,7 +225,15 @@ export const groupDeleteRelation = async (context, user, groupId, fromId, toId, 
     throw FunctionalError('Cannot delete the relation, Group cannot be found.', { groupId });
   }
   if (!isInternalRelationship(relationshipType)) {
-    throw FunctionalError(`Only ${ABSTRACT_INTERNAL_RELATIONSHIP} can be deleted through this method, got ${input.relationship_type}.`);
+    throw FunctionalError(`Only ${ABSTRACT_INTERNAL_RELATIONSHIP} can be deleted through this method, got ${relationshipType}.`);
+  }
+  // Authorization: only users with SETTINGS_SET_ACCESSES can modify groups,
+  // and organization admins are restricted to their grantable_groups
+  if (!isUserHasCapability(user, SETTINGS_SET_ACCESSES)) {
+    const groupsIds = R.uniq((user.administrated_organizations ?? []).map((orga) => (orga.grantable_groups ?? [])).flat());
+    if (!groupsIds.includes(groupId)) {
+      throw ForbiddenAccess();
+    }
   }
   let target;
   if (fromId) {

@@ -26,16 +26,46 @@ import { BYPASS, isUserHasCapability, KNOWLEDGE_KNUPDATE } from '../utils/access
 import { ForbiddenAccess } from '../config/errors';
 import { resolveUserIndividual } from '../domain/user';
 import { isEmptyField } from '../database/utils';
+import { internalLoadById } from '../database/middleware-loader';
 
-// Needs to have edit rights or needs to be creator of the note
+// Needs to have edit rights or needs to be creator of the note,
+// and must share at least one organization with the note's creator.
 const checkUserAccess = async (context, user, id) => {
   const userCapabilities = R.flatten(user.capabilities.map((c) => c.name.split('_')));
-  const isAuthorized = userCapabilities.includes(BYPASS) || userCapabilities.includes(KNOWLEDGE_UPDATE);
+  const isBypass = userCapabilities.includes(BYPASS);
+  const isAuthorized = userCapabilities.includes(KNOWLEDGE_UPDATE);
   const note = await findById(context, user, id);
   const isCreator = note[RELATION_CREATED_BY] ? note[RELATION_CREATED_BY] === user.individual_id : false;
   const isCollaborationAllowed = userCapabilities.includes(KNOWLEDGE_COLLABORATION) && isCreator;
-  const accessGranted = isAuthorized || isCollaborationAllowed;
+  const accessGranted = isBypass || isAuthorized || isCollaborationAllowed;
   if (!accessGranted) throw ForbiddenAccess();
+
+  // Enforce organization membership: non-bypass users must share at least
+  // one organization with the note's creator to prevent cross-org modification.
+  if (!isBypass && !isCreator) {
+    const creatorId = note[RELATION_CREATED_BY];
+    if (creatorId) {
+      const creator = await internalLoadById(context, user, creatorId);
+      const creatorOrgIds = new Set(
+        (creator?.objectOrganization || []).map(
+          (o) => (typeof o === 'string' ? o : (o.internal_id || o.id))
+        )
+      );
+      const userOrgIds = new Set(
+        (user.organizations || []).map((o) => o.internal_id)
+      );
+      let sharesOrganization = false;
+      for (const orgId of creatorOrgIds) {
+        if (userOrgIds.has(orgId)) {
+          sharesOrganization = true;
+          break;
+        }
+      }
+      if (!sharesOrganization) {
+        throw ForbiddenAccess();
+      }
+    }
+  }
 };
 
 const noteResolvers = {

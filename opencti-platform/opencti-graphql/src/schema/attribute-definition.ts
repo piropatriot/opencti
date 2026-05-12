@@ -361,6 +361,7 @@ export const authorizedAuthorities: TextAttribute = {
   multiple: true,
   upsert: false,
   isFilterable: false,
+  update: false,
 };
 
 export const metrics: NestedObjectAttribute = {

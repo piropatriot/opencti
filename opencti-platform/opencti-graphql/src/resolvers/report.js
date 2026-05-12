@@ -1,3 +1,4 @@
+import * as R from 'ramda';
 import {
   addReport,
   findById,
@@ -23,8 +24,53 @@ import {
 } from '../domain/stixDomainObject';
 import { distributionEntities } from '../database/middleware';
 import { ENTITY_TYPE_CONTAINER_REPORT } from '../schema/stixDomainObject';
+import { RELATION_CREATED_BY } from '../schema/stixRefRelationship';
+import { KNOWLEDGE_COLLABORATION, KNOWLEDGE_UPDATE } from '../schema/general';
+import { BYPASS, isUserHasCapability, KNOWLEDGE_KNUPDATE } from '../utils/access';
+import { ForbiddenAccess } from '../config/errors';
+import { internalLoadById } from '../database/middleware-loader';
 import { findSecurityCoverageByCoveredId } from '../modules/securityCoverage/securityCoverage-domain';
 import { loadParticipants } from '../database/members';
+
+// Needs to have edit rights or needs to be creator of the report,
+// and must share at least one organization with the report's creator.
+const checkUserAccess = async (context, user, id) => {
+  const userCapabilities = R.flatten(user.capabilities.map((c) => c.name.split('_')));
+  const isBypass = userCapabilities.includes(BYPASS);
+  const isAuthorized = userCapabilities.includes(KNOWLEDGE_UPDATE);
+  const report = await findById(context, user, id);
+  const isCreator = report[RELATION_CREATED_BY] ? report[RELATION_CREATED_BY] === user.individual_id : false;
+  const isCollaborationAllowed = userCapabilities.includes(KNOWLEDGE_COLLABORATION) && isCreator;
+  const accessGranted = isBypass || isAuthorized || isCollaborationAllowed;
+  if (!accessGranted) throw ForbiddenAccess();
+
+  // Enforce organization membership: non-bypass users must share at least
+  // one organization with the report's creator to prevent cross-org modification.
+  if (!isBypass && !isCreator) {
+    const creatorId = report[RELATION_CREATED_BY];
+    if (creatorId) {
+      const creator = await internalLoadById(context, user, creatorId);
+      const creatorOrgIds = new Set(
+        (creator?.objectOrganization || []).map(
+          (o) => (typeof o === 'string' ? o : (o.internal_id || o.id))
+        )
+      );
+      const userOrgIds = new Set(
+        (user.organizations || []).map((o) => o.internal_id)
+      );
+      let sharesOrganization = false;
+      for (const orgId of creatorOrgIds) {
+        if (userOrgIds.has(orgId)) {
+          sharesOrganization = true;
+          break;
+        }
+      }
+      if (!sharesOrganization) {
+        throw ForbiddenAccess();
+      }
+    }
+  }
+};
 
 const reportResolvers = {
   Query: {
@@ -65,19 +111,36 @@ const reportResolvers = {
   },
   Mutation: {
     reportEdit: (_, { id }, context) => ({
-      delete: ({ purgeElements }) => {
+      delete: async ({ purgeElements }) => {
+        await checkUserAccess(context, context.user, id);
         if (purgeElements) {
           return reportDeleteWithElements(context, context.user, id);
         }
         return stixDomainObjectDelete(context, context.user, id, ENTITY_TYPE_CONTAINER_REPORT);
       },
-      fieldPatch: ({ input, commitMessage, references }) => stixDomainObjectEditField(context, context.user, id, input, { commitMessage, references }),
-      contextPatch: ({ input }) => stixDomainObjectEditContext(context, context.user, id, input),
-      contextClean: () => stixDomainObjectCleanContext(context, context.user, id),
-      relationAdd: ({ input, commitMessage, references }) => stixDomainObjectAddRelation(context, context.user, id, input, { commitMessage, references }),
+      fieldPatch: async ({ input, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
+        const isManager = isUserHasCapability(context.user, KNOWLEDGE_KNUPDATE);
+        const availableInputs = isManager ? input : input.filter((i) => i.key !== 'createdBy');
+        return stixDomainObjectEditField(context, context.user, id, availableInputs, { commitMessage, references });
+      },
+      contextPatch: async ({ input }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectEditContext(context, context.user, id, input);
+      },
+      contextClean: async () => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectCleanContext(context, context.user, id);
+      },
+      relationAdd: async ({ input, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectAddRelation(context, context.user, id, input, { commitMessage, references });
+      },
       // eslint-disable-next-line max-len
-      relationDelete: ({ toId, relationship_type: relationshipType, commitMessage, references }) => stixDomainObjectDeleteRelation(context, context.user, id, toId, relationshipType, { commitMessage, references }),
-
+      relationDelete: async ({ toId, relationship_type: relationshipType, commitMessage, references }) => {
+        await checkUserAccess(context, context.user, id);
+        return stixDomainObjectDeleteRelation(context, context.user, id, toId, relationshipType, { commitMessage, references });
+      },
     }),
     reportAdd: (_, { input }, context) => addReport(context, context.user, input),
   },
